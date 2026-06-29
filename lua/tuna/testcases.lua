@@ -2,7 +2,7 @@ local utils = require("tuna.utils")
 
 local M = {}
 
-local function find_testcase_dirs(root)
+local function find_testcase_dirs(root, source_basename)
     local dirs = {}
     local scan = function(path)
         local ok, entries = pcall(vim.fn.readdir, path)
@@ -23,6 +23,18 @@ local function find_testcase_dirs(root)
 
     if utils.directory_exists(root .. "/tests") then
         scan(root .. "/tests")
+    end
+
+    if source_basename and source_basename ~= "" then
+        local base_dir = root
+        local input_path = base_dir .. "/" .. source_basename .. "_input0.txt"
+        local output_path = base_dir .. "/" .. source_basename .. "_output0.txt"
+        local input_exists = utils.file_exists(input_path)
+        local output_exists = utils.file_exists(output_path)
+
+        if input_exists or output_exists then
+            table.insert(dirs, base_dir)
+        end
     end
 
     return dirs
@@ -60,34 +72,41 @@ function M.add(project_root, name)
     return true, testcase_dir
 end
 
-function M.load_first(project_root)
+function M.load_first(project_root, source_basename)
     project_root = project_root or vim.fn.getcwd()
-    local dirs = find_testcase_dirs(project_root)
+    local dirs = find_testcase_dirs(project_root, source_basename)
 
     table.sort(dirs)
 
     for _, dir in ipairs(dirs) do
-        local input_path = dir .. "/input.txt"
-        local output_path = dir .. "/output.txt"
-        if utils.file_exists(input_path) then
-            local input_file = io.open(input_path, "r")
-            local output_file = io.open(output_path, "r")
-            local input = input_file and input_file:read("*a") or ""
-            local output = output_file and output_file:read("*a") or ""
+        local candidates = {
+            { dir .. "/input.txt", dir .. "/output.txt" },
+            { dir .. "/" .. (source_basename or "") .. "_input0.txt", dir .. "/" .. (source_basename or "") .. "_output0.txt" },
+        }
 
-            if input_file then
-                input_file:close()
-            end
-            if output_file then
-                output_file:close()
-            end
+        for _, pair in ipairs(candidates) do
+            local input_path = pair[1]
+            local output_path = pair[2]
+            if utils.file_exists(input_path) or utils.file_exists(output_path) then
+                local input_file = io.open(input_path, "r")
+                local output_file = io.open(output_path, "r")
+                local input = input_file and input_file:read("*a") or ""
+                local output = output_file and output_file:read("*a") or ""
 
-            return {
-                name = vim.fn.fnamemodify(dir, ":t"),
-                input = input,
-                output = output,
-                dir = dir,
-            }
+                if input_file then
+                    input_file:close()
+                end
+                if output_file then
+                    output_file:close()
+                end
+
+                return {
+                    name = vim.fn.fnamemodify(dir, ":t"),
+                    input = input,
+                    output = output,
+                    dir = dir,
+                }
+            end
         end
     end
 

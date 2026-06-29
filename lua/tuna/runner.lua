@@ -48,7 +48,8 @@ function M.new(bufnr)
     self.bufnr = bufnr
     self.filetype = vim.bo[bufnr].filetype or ""
     self.filepath = vim.api.nvim_buf_get_name(bufnr)
-    self.project_root = vim.fn.getcwd()
+    local source_dir = self.filepath ~= "" and vim.fn.fnamemodify(self.filepath, ":p:h") or ""
+    self.project_root = source_dir ~= "" and source_dir or vim.fn.getcwd()
 
     self.modifiers = {
         FNAME = vim.fn.fnamemodify(self.filepath, ":t"),
@@ -69,6 +70,25 @@ function M.new(bufnr)
     return self
 end
 
+function Runner:close_output()
+    if self.output_winid and vim.api.nvim_win_is_valid(self.output_winid) then
+        vim.api.nvim_win_close(self.output_winid, true)
+        self.output_winid = nil
+    elseif self.output_bufnr and vim.api.nvim_buf_is_valid(self.output_bufnr) then
+        vim.api.nvim_buf_delete(self.output_bufnr, { force = true })
+        self.output_bufnr = nil
+    end
+end
+
+function Runner:attach_output_keymaps(bufnr)
+    local function close_handler()
+        self:close_output()
+    end
+
+    vim.keymap.set("n", "q", close_handler, { buffer = bufnr, silent = true })
+    vim.keymap.set("n", "<Esc>", close_handler, { buffer = bufnr, silent = true })
+end
+
 function Runner:show_output()
     if self.output_bufnr and vim.api.nvim_buf_is_valid(self.output_bufnr) then
         return self.output_bufnr
@@ -82,6 +102,7 @@ function Runner:show_output()
     vim.api.nvim_buf_set_name(bufnr, "tuna://output")
 
     self.output_bufnr = bufnr
+    self:attach_output_keymaps(bufnr)
 
     if config.options.auto_open_output then
         local width = math.max(80, math.floor(vim.o.columns * 0.8))
@@ -204,7 +225,7 @@ function Runner:compile(on_success)
 end
 
 function Runner:run()
-    local test_case = testcases.load_first(self.project_root)
+    local test_case = testcases.load_first(self.project_root, self.modifiers.FNOEXT)
     local stdin_data = nil
     if test_case and test_case.input then
         stdin_data = test_case.input
