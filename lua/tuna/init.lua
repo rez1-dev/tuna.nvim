@@ -1,7 +1,7 @@
 -- lua/tuna/init.lua
 local config = require("tuna.config")
 local commands = require("tuna.commands")
-local http = require("tuna.http")
+local receive = require("tuna.receive")
 
 local M = {}
 
@@ -36,8 +36,9 @@ function M.setup(user_opts)
     })
 end
 
+---lualine component: shows the receive listener's state, or nothing when idle.
 function M.lualine_component()
-    return http.status()
+    return receive.status()
 end
 
 return M

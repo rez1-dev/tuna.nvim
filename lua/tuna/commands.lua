@@ -1,26 +1,41 @@
 -- lua/tuna/commands.lua
 local M = {}
 
-local http = require("tuna.http")
+local config = require("tuna.config")
+local receive = require("tuna.receive")
 local runner = require("tuna.runner")
 local testcases = require("tuna.testcases")
 
+---Start receiving in `mode`, honouring the current buffer's configuration.
+---@param mode tuna.ReceiveMode
+local function start_receiving(mode)
+    local bufnr = vim.api.nvim_get_current_buf()
+    local cfg = config.get_buffer_config(bufnr)
+    local err = receive.start_receiving(mode, cfg.companion_port, true, cfg.receive_print_message, bufnr, cfg)
+    if err then
+        vim.notify("Tuna: " .. err, vim.log.levels.ERROR)
+    end
+end
+
 M.subcommands = {
-    download_problem = function(port, host)
-        local ok, err = http.start_server(port, host, { mode = "problem", download_state = {} })
-        if ok then
-            vim.notify("Tuna: ready to receive a problem. Press the green plus button in your browser.", vim.log.levels.INFO)
-        else
-            vim.notify("Tuna: failed to start listener: " .. tostring(err), vim.log.levels.ERROR)
-        end
+    download_problem = function()
+        start_receiving("problem")
     end,
-    download_contest = function(port, host)
-        local ok, err = http.start_server(port, host, { mode = "contest", download_state = {} })
-        if ok then
-            vim.notify("Tuna: ready to receive a contest. Press the green plus button in your browser.", vim.log.levels.INFO)
-        else
-            vim.notify("Tuna: failed to start listener: " .. tostring(err), vim.log.levels.ERROR)
-        end
+    download_contest = function()
+        start_receiving("contest")
+    end,
+    receive = function()
+        start_receiving("persistently")
+    end,
+    receive_testcases = function()
+        start_receiving("testcases")
+    end,
+    stop_receive = function()
+        receive.stop_receiving()
+        vim.notify("Tuna: stopped receiving.", vim.log.levels.INFO)
+    end,
+    receive_status = function()
+        receive.show_status()
     end,
     test = function()
         runner.new():run()

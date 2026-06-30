@@ -77,4 +77,18 @@ configurable avoids forcing a migration on anyone coming from either convention.
 
 ---
 
+## Receive: live listener status for lualine
+
+✅ **Decision:** `receive.lua` exposes `status()`, `is_receiving()` and `mode()`,
+and `require("tuna").lualine_component` renders `status()` — an empty string when
+idle, or e.g. `🐟 receiving contest` while the listener is live.
+
+**Why:** competitest only offers `show_status()`, a one-shot notification you have
+to ask for. With a persistent receive mode it's easy to forget the listener is
+running (or to think it is when it isn't). Surfacing the state continuously in the
+statusline is a small but real quality-of-life win, and it costs nothing — the
+component is just a string read from module state.
+
+---
+
 <!-- Add new entries above this line as decisions are made. -->

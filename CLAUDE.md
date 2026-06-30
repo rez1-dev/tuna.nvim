@@ -24,12 +24,12 @@ The project proceeds in three phases. Update the checklist below as work progres
    - [x] 3. `compare.lua` — `exact` / `squish` / custom comparison
    - [x] 4. `testcases.lua` — three storage backends (single msgpack file, flat io-file pairs, dir-per-testcase), auto-detect, buffer helpers
    - [x] 5. `widgets.lua` — native (no nui) input prompt, testcase editor + picker; `resize_widgets()` for `VimResized`
-   - [ ] 6. `receive.lua` — batch-aware pipeline (Receiver → collector → serial processor), receive modifiers, templates, configurable paths; **absorbs and removes `http.lua`**
+   - [x] 6. `receive.lua` — batch-aware pipeline (Receiver → collector → serial processor), receive modifiers, templates, configurable paths, lualine `status()`; **absorbed and removed `http.lua`**
    - [ ] 7. `runner.lua` — multi-testcase run via `vim.system`, parallelism, per-process timeout, kill/re-run, compare integration
    - [ ] 8. `runner_ui/` (`init.lua` `popup.lua` `split.lua`) — native results UI, recursive layout engine, viewer, diff view
    - [ ] 9. `commands.lua` — full subcommand surface (`add/edit/delete_testcase`, `convert`, `run`, `run_no_compile`, `show_ui`, `receive …`) + completion
    - [ ] 10. `init.lua` — finalize `setup()`, highlight groups, `VimResized` resize autocmd, persistent-receive-on-setup
-   - [ ] ~~`http.lua`~~ — to be folded into `receive.lua` and deleted (was not in the original design)
+   - [x] ~~`http.lua`~~ — folded into `receive.lua` and deleted (was not in the original design)
 3. **Extend** — once parity with competitest.nvim is reached, add new features beyond what the original plugin had.
 
 _(Phase 1 review complete. Currently entering Phase 2 — update this line as phases progress.)_
@@ -42,9 +42,8 @@ Module responsibilities:
 
 - **`init.lua`** — plugin setup, registers `:Tuna` command with tab-completion
 - **`config.lua`** — layers defaults → user `setup()` opts (`current_setup`) → per-directory local config (`.tuna.lua`, found by walking up the tree from a buffer's file). `get_buffer_config(bufnr)` resolves + caches per-buffer config. `update_config_table` replaces per-language command `args` instead of index-merging them. Full schema covers compile/run, testcase storage (`testcases_storage` enum), receive, and UI options. `config.options` is a compat alias for `current_setup` read by the not-yet-ported runner
-- **`commands.lua`** — maps subcommand strings to handler functions (`download_problem`, `download_contest`, `test`, `add_testcase`)
-- **`http.lua`** — TCP server via `vim.uv` that listens for Competitive Companion payloads (default port 4242, host 127.0.0.1). Parses raw HTTP, decodes JSON, then delegates to `receive`. Exposes `status()` for the optional lualine component
-- **`receive.lua`** — parses Competitive Companion JSON payloads (`build_import_plan`, `parse_payload`, `import_payload`). Handles both single-problem and contest modes. Creates directory structure and writes source file + testcase files to disk
+- **`commands.lua`** — maps subcommand strings to handler functions (`download_problem`, `download_contest`, `receive`, `receive_testcases`, `stop_receive`, `receive_status`, `test`, `add_testcase`)
+- **`receive.lua`** — owns the Competitive Companion integration end-to-end (absorbed the old `http.lua`). Pipeline `Receiver` (TCP listener, default port `companion_port` 27121) → `TasksCollector` (groups tasks by `batch.id`/`batch.size`) → `BatchesSerialProcessor` (runs one batch handler at a time). `start_receiving(mode, …)` supports modes `testcases`/`problem`/`contest`/`persistently`; storage helpers expand receive modifiers (`$(JUDGE)`, `$(CONTEST)`, `$(PROBLEM)`, …), apply templates, prompt for paths via `widgets.input`, and write source + testcases through the `testcases` backends. Exposes `status()`/`is_receiving()`/`mode()` for the lualine component and `show_status()`/`stop_receiving()`
 - **`testcases.lua`** — reads/writes testcases via three interchangeable backends (`files`, `single_file`, `directory`) sharing a 0-based `{ [n] = { input, output } }` table. Pure `load`/`write` per backend; `buf_*` wrappers derive paths from buffer config; module-level `buf_get_testcases`/`buf_write_testcases`/`buf_save_testcase`/`buf_delete_testcase` dispatch to the configured backend with auto-detect fallback; `buf_clear` per backend supports `convert`. `add`/`load_first` are deprecated shims for the not-yet-ported runner/commands
 - **`runner.lua`** — `Runner` object that optionally compiles then runs the current buffer's file, feeding `stdin` from the loaded testcase and comparing stdout against expected output. Uses `vim.uv.spawn` for async process execution. Opens a floating output window (`tuna://output`)
 - **`compare.lua`** — output comparison: `compare_output(output, expected, method)` with builtin `exact`/`squish` methods and custom-function support; returns `true`/`false`/`nil`
@@ -53,8 +52,8 @@ Module responsibilities:
 
 ### Key data flow
 
-1. User runs `:Tuna download_problem` → `http.start_server()` starts TCP listener
-2. Competitive Companion POSTs JSON → `http` parses it → `receive.import_payload()` creates dirs + files on disk
+1. User runs `:Tuna download_problem` → `receive.start_receiving("problem", …)` opens the TCP listener
+2. Competitive Companion POSTs JSON → `Receiver` decodes each task → `TasksCollector` waits for the full batch → `BatchesSerialProcessor` runs the mode's handler → source + testcase files written to disk (and the source opened)
 3. User runs `:Tuna test` → `runner.new()` builds a `Runner` for the current buffer → `runner:run()` calls `runner:compile()` then spawns the run process with `testcases.load_first()` as stdin
 
 ### Command modifiers (template variables)

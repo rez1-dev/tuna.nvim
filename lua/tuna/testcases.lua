@@ -424,6 +424,13 @@ function M.buf_write_testcases(bufnr, tctbl, storage)
     M.backend(storage or cfg.testcases_storage).buf_write(bufnr, tctbl)
 end
 
+---Remove every testcase a buffer stores, using its configured backend.
+---@param bufnr integer
+function M.buf_clear(bufnr)
+    local cfg = config.get_buffer_config(bufnr)
+    M.backend(cfg.testcases_storage).buf_clear(bufnr)
+end
+
 ---Create or replace a single testcase for a buffer.
 ---@param bufnr integer
 ---@param tcnum integer
