@@ -23,7 +23,7 @@ The project proceeds in three phases. Update the checklist below as work progres
    - [x] 2. `config.lua` — full option schema, buffer-config cache, local-config directory walk, per-language arg replacement on extend
    - [x] 3. `compare.lua` — `exact` / `squish` / custom comparison
    - [x] 4. `testcases.lua` — three storage backends (single msgpack file, flat io-file pairs, dir-per-testcase), auto-detect, buffer helpers
-   - [ ] 5. `widgets.lua` — native (no nui) input prompt, then testcase editor + picker
+   - [x] 5. `widgets.lua` — native (no nui) input prompt, testcase editor + picker; `resize_widgets()` for `VimResized`
    - [ ] 6. `receive.lua` — batch-aware pipeline (Receiver → collector → serial processor), receive modifiers, templates, configurable paths; **absorbs and removes `http.lua`**
    - [ ] 7. `runner.lua` — multi-testcase run via `vim.system`, parallelism, per-process timeout, kill/re-run, compare integration
    - [ ] 8. `runner_ui/` (`init.lua` `popup.lua` `split.lua`) — native results UI, recursive layout engine, viewer, diff view
@@ -48,6 +48,7 @@ Module responsibilities:
 - **`testcases.lua`** — reads/writes testcases via three interchangeable backends (`files`, `single_file`, `directory`) sharing a 0-based `{ [n] = { input, output } }` table. Pure `load`/`write` per backend; `buf_*` wrappers derive paths from buffer config; module-level `buf_get_testcases`/`buf_write_testcases`/`buf_save_testcase`/`buf_delete_testcase` dispatch to the configured backend with auto-detect fallback; `buf_clear` per backend supports `convert`. `add`/`load_first` are deprecated shims for the not-yet-ported runner/commands
 - **`runner.lua`** — `Runner` object that optionally compiles then runs the current buffer's file, feeding `stdin` from the loaded testcase and comparing stdout against expected output. Uses `vim.uv.spawn` for async process execution. Opens a floating output window (`tuna://output`)
 - **`compare.lua`** — output comparison: `compare_output(output, expected, method)` with builtin `exact`/`squish` methods and custom-function support; returns `true`/`false`/`nil`
+- **`widgets.lua`** — native floating-window widgets (no nui): `input` single-line prompt, `editor` two-pane testcase editor (`:w`/`:wq` save via `BufWriteCmd`), `picker` testcase chooser. Each is a module-level singleton so `resize_widgets()` can rebuild visible ones on `VimResized`. Config under `editor_ui`/`picker_ui`/`floating_border`
 - **`utils.lua`** — `notify`; modifier engine (`format_modifiers` state-machine parser, `file_format_modifiers`, `eval_string`, `buf_eval_string`); filesystem helpers (`file_exists`, `directory_exists`, `ensure_directory`, `read_file`, `write_file`, `delete_file`, `normalize_path`); `get_ui_size`. `apply_modifiers` is a deprecated compat shim for the not-yet-ported `runner.lua`
 
 ### Key data flow

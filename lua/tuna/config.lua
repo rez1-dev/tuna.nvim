@@ -98,6 +98,10 @@ M.defaults = {
     picker_ui = {
         width = 0.2,
         height = 0.3,
+        mappings = {
+            close = { "<esc>", "<C-c>", "q", "Q" },
+            submit = "<cr>",
+        },
     },
     runner_ui = {
         interface = "popup", -- "popup" | "split"
