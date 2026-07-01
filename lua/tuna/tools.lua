@@ -275,12 +275,29 @@ function M.flush_buffer(path)
     flush_source_buffer(path)
 end
 
+---Persistent compile cache, keyed by absolute source path, so a *fresh* spec for
+---the same unchanged source (e.g. `gen.cpp`/`brute.cpp` on a repeated `:Tuna run
+---stress`) reuses the previous build instead of recompiling. Invalidated when the
+---source's mtime or the exact compile command changes, so editing the source (or
+---the compile flags) still rebuilds. This is what keeps the iterate-and-re-run
+---loop fast when only the solution changed.
+---@type table<string, { mtime: number?, cmdkey: string, compiled: boolean?, error: string?, compiling: boolean?, waiters: (fun(ok: boolean, err: string?))[]? }>
+local compile_cache = {}
+
+---A stable key for a compile command (exec + args), so a flag change invalidates.
+---@param cmd { exec: string, args: string[]? }
+---@return string
+local function command_key(cmd)
+    return (cmd.exec or "") .. "\0" .. table.concat(cmd.args or {}, "\0")
+end
+
 ---Ensure a spec produced by `program`/`checker_spec` is compiled, then call `cb`.
----The result is cached on the spec keyed by the source file's mtime, so a batch of
----parallel `judge`s compiles once (concurrent callers queue behind the in-flight
----compile) yet **editing the source and re-running recompiles it** rather than
----running a stale binary. A spec without a `compile` step (interpreted language, or
----a prebuilt binary) is ready immediately.
+---The result is cached (persistently, across specs) keyed by the source path +
+---mtime + compile command, so a batch of parallel `judge`s compiles once
+---(concurrent callers queue behind the in-flight compile) and repeated runs skip
+---recompiling an unchanged source, yet **editing the source or flags and
+---re-running recompiles it**. A spec without a `compile` step (interpreted
+---language, or a prebuilt binary) is ready immediately.
 ---@param spec table
 ---@param cb fun(ok: boolean, err: string?)
 function M.prepare(spec, cb)
@@ -293,44 +310,50 @@ function M.prepare(spec, cb)
         return
     end
 
+    local key = spec.source and vim.fs.normalize(spec.source) or command_key(spec.compile)
+    local cmdkey = command_key(spec.compile)
+    local entry = compile_cache[key]
+    if not entry or entry.cmdkey ~= cmdkey then
+        entry = { cmdkey = cmdkey } -- new source, or the compile command changed
+        compile_cache[key] = entry
+    end
+
     local mtime = source_mtime(spec.source)
     -- Reuse a cached result only if the source hasn't changed since we built it.
-    if spec._built_mtime == mtime then
-        if spec._compiled then
+    if entry.mtime == mtime and not entry.compiling then
+        if entry.compiled then
             cb(true)
             return
-        elseif spec._error then
-            cb(false, spec._error)
+        elseif entry.error then
+            cb(false, entry.error)
             return
         end
     end
 
-    spec._waiters = spec._waiters or {}
-    table.insert(spec._waiters, cb)
-    if spec._compiling then
+    entry.waiters = entry.waiters or {}
+    table.insert(entry.waiters, cb)
+    if entry.compiling then
         return -- a compile is already running; we'll be flushed when it lands
     end
-    spec._compiling = true
+    entry.compiling = true
 
     utils.ensure_directory(spec.compile_dir)
     local argv = vim.list_extend({ spec.compile.exec }, vim.deepcopy(spec.compile.args or {}))
     vim.system(argv, { cwd = spec.compile_dir }, function(res)
         vim.schedule(function()
-            spec._compiling = false
+            entry.compiling = false
             -- Re-read the mtime: capture what we actually compiled (the file may
             -- have changed again while g++ was running).
-            spec._built_mtime = source_mtime(spec.source)
+            entry.mtime = source_mtime(spec.source)
             if res.code == 0 then
-                spec._compiled = true
-                spec._error = nil
+                entry.compiled, entry.error = true, nil
             else
-                spec._compiled = false
-                spec._error = "compilation failed:\n" .. (res.stderr or "")
+                entry.compiled, entry.error = false, "compilation failed:\n" .. (res.stderr or "")
             end
-            local waiters = spec._waiters
-            spec._waiters = nil
+            local waiters = entry.waiters
+            entry.waiters = nil
             for _, w in ipairs(waiters or {}) do
-                w(spec._compiled == true, spec._error)
+                w(entry.compiled == true, entry.error)
             end
         end)
     end)

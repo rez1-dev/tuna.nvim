@@ -254,6 +254,25 @@ solution's compile/run commands, working directories, and checker, then drives t
 loop with `vim.system` (using its `timeout` option) and `checker.judge` from
 Workstream 1.
 
+**Compile cache (`tools.prepare`).** Helpers (generator/reference/checker/…) are
+compiled through a *persistent, session-wide* cache keyed by the source's absolute
+path + mtime + exact compile command. So a repeated `:Tuna run stress` recompiles
+only what actually changed (usually just the solution) and reuses the unchanged
+`gen`/`brute` builds, keeping the edit-and-re-run loop fast. Editing a source, or
+changing its compile flags, invalidates the entry and rebuilds.
+
+📌 **README note — recommended C++ setup (precompiled `bits/stdc++.h`).** Tuna
+compiles helpers with the *same* command as `:Tuna run` (the per-language
+`compile_command`), so a precompiled-header setup is honoured everywhere (normal
+run, stress, run-all, checkers). We should recommend, in the README, the
+competitive-programming standard of a precompiled `<bits/stdc++.h>`: e.g. a
+`~/cp/bits/stdc++.h.gch` built with the *exact* flags used in `compile_command`
+(`-std=… -DLOCAL -Wall … -I$(HOME)/cp`), and `#include <bits/stdc++.h>` in the
+solution/helpers. Because stress compiles three programs (solution + generator +
+reference), the PCH is what keeps that fast — without it each translation unit
+re-parses the whole standard library. (Verified: with the PCH, three heavy TUs
+compile in ~2.6 s vs ~6.9 s without.)
+
 ## Interactive problems (`interactive.lua`)
 
 ✅ **Done (Workstream 2).** Brand new — competitest can't run interactive problems

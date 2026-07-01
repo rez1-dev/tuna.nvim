@@ -130,6 +130,11 @@ end
 ---@type table<integer, tuna.TCRunner>
 M.runners = {}
 
+---The mode each buffer was last run in, so `show_ui` re-opens the matching UI
+---(e.g. the stress runner's, not a fresh normal one).
+---@type table<integer, string>
+M.last_mode = {}
+
 ---Resolve the buffer a run should target — redirecting a helper buffer (e.g.
 ---`checker.cpp`) to the solution beside it. Notifies and returns nil on failure.
 ---@return integer? bufnr, string? mode label of the resolved buffer's active mode
@@ -198,6 +203,7 @@ end
 ---@param compile boolean compile before running (normal mode only)
 ---@param bufnr integer
 function M.dispatch_mode(mode, args, compile, bufnr)
+    M.last_mode[bufnr] = mode
     if mode == "all" then
         require("tuna.multi").run(bufnr)
     elseif mode == "stress" then
@@ -207,6 +213,18 @@ function M.dispatch_mode(mode, args, compile, bufnr)
     else -- "normal"
         M.run_testcases(bufnr, #args > 0 and args or nil, compile, false)
     end
+end
+
+---(Re)open the results UI for a buffer without running — honouring the last run's
+---mode, so a stress run re-opens its own UI rather than a fresh normal one.
+---@param bufnr integer
+function M.show_results_ui(bufnr)
+    local stress = require("tuna.stress")
+    if M.last_mode[bufnr] == "stress" and stress.active[bufnr] then
+        stress.active[bufnr]:show_ui()
+        return
+    end
+    M.run_testcases(bufnr, nil, false, true)
 end
 
 ---Handle `:Tuna run [mode] [args]`. A leading mode keyword switches the buffer's
@@ -311,7 +329,7 @@ M.subcommands = {
     show_ui = function()
         local bufnr = M.solution_bufnr()
         if bufnr then
-            M.run_testcases(bufnr, nil, false, true)
+            M.show_results_ui(bufnr)
         end
     end,
     receive = function(args)
@@ -375,7 +393,7 @@ function M.open_menu()
         { "Checker: " .. (checker_on and "on (click to disable)" or "off (click to enable)"), function()
             M.set_checker(bufnr)
         end },
-        { "Show results UI", function() M.run_testcases(bufnr, nil, false, true) end },
+        { "Show results UI", function() M.show_results_ui(bufnr) end },
         { "Scaffold: checker", function() require("tuna.scaffold").create("checker", cur) end },
         { "Scaffold: generator", function() require("tuna.scaffold").create("generator", cur) end },
         { "Scaffold: brute", function() require("tuna.scaffold").create("brute", cur) end },

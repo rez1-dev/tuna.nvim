@@ -249,6 +249,9 @@ function StressRunner:generation(i)
         return
     end
     if self.saved_this_run >= self.saves_per_run then
+        -- Save limit hit (only actually-saved, deduplicated counterexamples count):
+        -- stop the search. No message → finishes silently, per your notify change.
+        self:finish()
         return
     end
     if #self.tcdata >= self.max_saved then
@@ -499,7 +502,7 @@ function M.run(bufnr, count_override)
             utils.notify(
                 "stress: no "
                     .. label
-                    .. " found — create a sibling '"
+                    .. " found, create a sibling '"
                     .. tools.DEFAULT_NAMES[role][1]
                     .. ".*' "
                     .. "file, or set 'stress."
@@ -550,7 +553,8 @@ function M.run(bufnr, count_override)
         -- The solution's compile step is shown as the first testcase row (so its
         -- warnings are viewable), like the normal runner. nil for interpreted
         -- solutions. gen/ref compile separately (errors shown in a float).
-        compile_entry = r.compile and { tcnum = "Compile", stdin = "", expected = nil, status = "", hlgroup = "TunaRunning" }
+        compile_entry = r.compile
+                and { tcnum = "Compile", stdin = "", expected = nil, status = "", hlgroup = "TunaRunning" }
             or nil,
         tcdata = {},
         next_num = 0,
