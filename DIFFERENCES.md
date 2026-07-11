@@ -140,6 +140,40 @@ component is just a string read from module state.
 
 ---
 
+## User-customizable per-judge parsing (`judges.lua`)
+
+✅ **Done (Workstream 3).** competitest normalized Competitive Companion's
+`task.group` ("Judge - Contest") into folder names with a **hardcoded** block that
+only knew Codeforces and AtCoder, buried in the receive path — to support another
+judge you had to patch the plugin. tuna extracts this into `judges.lua`: a
+`judge_parsers` config table of per-judge **parser functions**, with the CF/AtCoder
+logic shipped as built-in defaults.
+
+```lua
+judge_parsers = {
+  -- add a new judge
+  codechef = function(ctx) return { contest = ctx.contest:match("starters%s*%d+") } end,
+  -- override or disable a built-in (`false` keeps the raw contest name)
+  atcoder = false,
+  -- catch-all applied to any judge without its own parser
+  ["*"] = function(ctx) return { contest = ctx.contest:gsub("%s*%b()", "") } end,
+}
+```
+
+A parser receives `{ judge, contest, group, task }` (judge/contest already split and
+lowercased) and returns `{ judge?, contest? }` overrides — nil fields keep the parsed
+values, so a parser only states what it changes. Resolution per judge is **user
+parser → built-in → user `["*"]` catch-all**, and a parser is `pcall`-guarded so a
+buggy one warns and falls back to the raw contest instead of breaking a receive. The
+built-in Codeforces/AtCoder normalizers are unchanged in behaviour from competitest —
+they're just now defaults you can replace.
+
+**Why:** contest-naming conventions differ per judge and change over time; making the
+rules data (config) rather than code lets users support CodeChef/USACO/etc. and fix
+naming without forking the plugin.
+
+---
+
 ## Runner UI: native windows, simpler hide/show
 
 ✅ **Decision:** the runner results UI (`runner_ui/`) is built on native floats

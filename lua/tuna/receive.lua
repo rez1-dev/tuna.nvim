@@ -23,6 +23,7 @@
 local utils = require("tuna.utils")
 local config = require("tuna.config")
 local testcases = require("tuna.testcases")
+local judges = require("tuna.judges")
 
 local M = {}
 
@@ -199,43 +200,12 @@ end
 ---@param task tuna.CCTask
 ---@param file_extension string
 ---@param remove_illegal_chars boolean strip characters illegal in filenames
----@param date_format string?
+---@param cfg table? resolved config (for `judge_parsers` and `date_format`)
 ---@return string? # evaluated string, or `nil` on failure
-local function eval_receive_modifiers(str, task, file_extension, remove_illegal_chars, date_format)
-    -- `group` is "Judge - Contest"; split it so JUDGE/CONTEST are available and,
-    -- for well-known judges, normalise the contest into a short, tidy folder name.
-    local judge, contest
-    local hyphen = string.find(task.group or "", " - ", 1, true)
-    if not hyphen then
-        judge = task.group or "unknown_judge"
-        contest = "unknown_contest"
-    else
-        judge = string.lower(string.sub(task.group, 1, hyphen - 1))
-        contest = string.lower(string.sub(task.group, hyphen + 3))
-        if judge == "codeforces" then
-            local edu = contest:match("educational.-codeforces.-round%s*(%d+)")
-            local global = contest:match("codeforces.-global.-round%s*(%d+)")
-            local round = contest:match("codeforces.-round%s*(%d+)")
-            local specific = contest:match("^(%a+.-round%s*%d+)")
-            if edu then
-                contest = "edu round " .. edu
-            elseif global then
-                contest = "global round " .. global
-            elseif round then
-                contest = "round " .. round
-            elseif specific then
-                contest = specific
-            end
-        elseif judge == "atcoder" then
-            local beg = contest:match("beginner.-contest%s*(%d+)")
-            local round = contest:match("contest%s*(%d+)")
-            if beg then
-                contest = "beg round " .. beg
-            elseif round then
-                contest = "reg round " .. round
-            end
-        end
-    end
+local function eval_receive_modifiers(str, task, file_extension, remove_illegal_chars, cfg)
+    -- Split "Judge - Contest" and normalise it via the (user-overridable) judge parsers.
+    local judge, contest = judges.parse(task, cfg and cfg.judge_parsers)
+    local date_format = cfg and cfg.date_format
 
     local java = (task.languages and task.languages.java) or {}
     ---@type table<string, string>
@@ -272,12 +242,13 @@ end
 ---@param path string|fun(task: tuna.CCTask, file_extension: string): string
 ---@param task tuna.CCTask
 ---@param file_extension string
+---@param cfg table? resolved config (for `judge_parsers`/`date_format`)
 ---@return string?
-local function eval_path(path, task, file_extension)
+local function eval_path(path, task, file_extension, cfg)
     if type(path) == "function" then
         return path(task, file_extension)
     end
-    return eval_receive_modifiers(path, task, file_extension, true)
+    return eval_receive_modifiers(path, task, file_extension, true, cfg)
 end
 
 ---Convert a task's `tests` list into a 0-indexed testcase table.
@@ -352,7 +323,7 @@ local function store_received_task(filepath, confirm_overwrite, task, cfg)
     if template_file then
         if cfg.evaluate_template_modifiers then
             local content = utils.read_file(template_file) or ""
-            local evaluated = eval_receive_modifiers(content, task, file_extension, false, cfg.date_format)
+            local evaluated = eval_receive_modifiers(content, task, file_extension, false, cfg)
             utils.write_file(filepath, evaluated or "")
         else
             utils.ensure_directory(vim.fn.fnamemodify(filepath, ":h"))
@@ -413,7 +384,7 @@ end
 ---@param cfg table
 ---@param finished fun()?
 local function store_single_problem(task, cfg, finished)
-    local default_path = eval_path(cfg.received_problems_path, task, cfg.received_files_extension)
+    local default_path = eval_path(cfg.received_problems_path, task, cfg.received_files_extension, cfg)
     if not default_path then
         utils.notify("'received_problems_path' evaluation failed for task '" .. task.name .. "'")
         if finished then
@@ -451,7 +422,7 @@ end
 ---@param cfg table
 ---@param finished fun()?
 local function store_contest(tasks, cfg, finished)
-    local default_dir = eval_path(cfg.received_contests_directory, tasks[1], cfg.received_files_extension)
+    local default_dir = eval_path(cfg.received_contests_directory, tasks[1], cfg.received_files_extension, cfg)
     if not default_dir then
         utils.notify("'received_contests_directory' evaluation failed")
         if finished then
@@ -478,7 +449,7 @@ local function store_contest(tasks, cfg, finished)
                 function(file_extension)
                     local opened = false
                     for _, task in ipairs(tasks) do
-                        local problem_path = eval_path(local_cfg.received_contests_problems_path, task, file_extension)
+                        local problem_path = eval_path(local_cfg.received_contests_problems_path, task, file_extension, local_cfg)
                         if problem_path then
                             local filepath = directory .. "/" .. problem_path
                             store_received_task(filepath, true, task, local_cfg)

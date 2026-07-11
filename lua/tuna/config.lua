@@ -148,6 +148,17 @@ M.defaults = {
     companion_port = 27121,
     receive_print_message = true,
     start_receiving_persistently_on_setup = false,
+    -- Per-judge parsing of Competitive Companion's `task.group` ("Judge - Contest")
+    -- into the $(JUDGE)/$(CONTEST) modifiers. Add a parser for a new judge, override
+    -- a built-in, or disable one with `false`. A parser gets
+    -- `{ judge, contest, group, task }` and returns overrides (nil fields kept):
+    --   judge_parsers = {
+    --     codechef = function(ctx) return { contest = ctx.contest:match("%((.-)%)") } end,
+    --     codeforces = false,               -- keep Codeforces' raw contest name
+    --     ["*"] = function(ctx) ... end,     -- catch-all for judges with no parser
+    --   }
+    -- Codeforces and AtCoder have built-in defaults (see `judges.lua`).
+    judge_parsers = {},
     template_file = false, -- false | string with modifiers | { [ext] = path }
     evaluate_template_modifiers = false,
     date_format = "%c",
