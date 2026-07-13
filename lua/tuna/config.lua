@@ -186,6 +186,14 @@ M.defaults = {
         -- function(ctx) -> string. Falls back to the per-problem sidecar below.
         url = "submit at:%s*(%S+)",
         url_scan_lines = 10,
+        -- Optional header markers to backfill the sidecar's contest/name (like `url`
+        -- above) when a problem was set up outside the receive flow. Each is a Lua
+        -- pattern scanned over the same header lines (first capture wins); nil to
+        -- disable. These match the labels the default template writes
+        -- (`// contest: …` / `// problem: …`); a received problem's sidecar already
+        -- carries the authoritative values, so these only fill a missing field.
+        group = "contest:%s*(.-)%s*$",
+        name = "problem:%s*(.-)%s*$",
         url_store_file = ".tuna.json", -- receive writes {url,name,group} here per problem
         -- filetype -> the language name your submit tool expects
         languages = { cpp = "C++", c = "C", python = "Python 3", java = "Java", rust = "Rust" },
@@ -201,6 +209,21 @@ M.defaults = {
         -- How long (ms) the terminal-path "submitting …" flash stays up (watch mode
         -- ignores this — its state persists until the next submit). 0 disables it.
         status_time = 6000,
+        -- Whether the submit tool streams a parseable judge verdict (true, e.g. the
+        -- Rust submitter on Codeforces). Set false for a fire-and-forget tool that
+        -- just submits and prints no verdict: watch mode then runs it in the
+        -- background (no terminal, lualine shows "submitting …"), treats a clean exit
+        -- as success (clears the indicator), and only a non-zero exit as an error.
+        expects_verdict = true,
+        -- Watch-mode safety net (ms): if a submit job never reports a final verdict
+        -- within this long (a hung/abandoned poll), stop watching and clear the
+        -- indicator so it doesn't stick forever. The submission itself already
+        -- happened — this only stops polling. 0 disables.
+        watch_timeout = 120000,
+        -- Debug: if set to a file path, watch mode dumps each submission's raw
+        -- stdout/stderr (control codes intact) and the parsed verdict there, so a
+        -- misbehaving judge's exact output can be inspected. nil disables.
+        log_file = nil,
         -- Verdict classifier for watch mode: ordered { lua_pattern, state } rules
         -- matched (first wins) against each lowercased stdout status line. States
         -- `accepted`/`rejected`/`partial` are final; `pending` keeps watching.
@@ -219,6 +242,7 @@ M.defaults = {
             { "wrong answer", "rejected" },
             { "time limit", "rejected" },
             { "memory limit", "rejected" },
+            { "cpu exhausted", "rejected" },
             { "idleness limit", "rejected" },
             { "runtime error", "rejected" },
             { "compilation error", "rejected" },
@@ -227,12 +251,15 @@ M.defaults = {
             { "hacked", "rejected" },
             { "skipped", "rejected" },
             { "rejected", "rejected" },
-            { "failed", "rejected" },
+            -- "failed on test N" (not a bare "failed", which also appears in benign
+            -- warnings like "failed to save cookies")
+            { "failed on test", "rejected" },
             { "crashed", "rejected" },
             { "security", "rejected" },
         },
-        -- state -> highlight group for the lualine verdict color (reuses tuna's
-        -- runner highlight groups; override to taste).
+        -- state -> lualine color for the verdict. Each value is either a highlight
+        -- group name (its foreground is used; reuses tuna's runner groups) or a color
+        -- table like `{ fg = "#ff6c6b" }` to match your statusline palette exactly.
         verdict_hl = {
             pending = "TunaWarning",
             accepted = "TunaCorrect",
@@ -240,6 +267,20 @@ M.defaults = {
             rejected = "TunaWrong",
             error = "TunaWrong",
         },
+        -- Per-judge overrides. The judge is derived from the submission URL's host
+        -- (atcoder.jp -> "atcoder", codeforces.com -> "codeforces", …). Each entry is
+        -- a partial `submit` table shallow-merged over the base above, so you can point
+        -- a judge at a different tool (and its own verdict/language/watch settings) or
+        -- a different `provider`, while everything else falls back to the defaults.
+        -- The built-in `browser` provider opens the judge's submit page in the browser
+        -- and copies the source to the clipboard — the only way to submit to judges
+        -- that gate submission behind a challenge no CLI can solve (AtCoder's
+        -- Cloudflare Turnstile). Example:
+        --   judges = {
+        --     atcoder = { provider = "browser" },
+        --   }
+        -- `command` may also be a `function(ctx) -> string` for fully custom dispatch.
+        judges = {},
     },
 
     -- Opt-in keymaps. Nothing is mapped unless you add entries; each maps an action

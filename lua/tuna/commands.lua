@@ -23,6 +23,7 @@ local subcommand_args = {
     scaffold = { "checker", "generator", "brute", "interactor" },
     checker = { "on", "off", "toggle" },
     compare = { "exact", "squish", "float", "default" },
+    submit = { "clear" },
 }
 
 -- Third-level completions: `:Tuna run interactive <Tab>` offers its input sources.
@@ -451,9 +452,14 @@ M.subcommands = {
         end
         require("tuna.scaffold").create(args[1], api.nvim_get_current_buf(), args[2])
     end,
-    submit = function()
+    submit = function(args)
         local bufnr = M.solution_bufnr()
-        if bufnr then
+        if not bufnr then
+            return
+        end
+        if args[1] == "clear" then
+            require("tuna.submit").clear(bufnr) -- dismiss the lualine verdict / cancel a running submit
+        else
             require("tuna.submit").submit(bufnr)
         end
     end,

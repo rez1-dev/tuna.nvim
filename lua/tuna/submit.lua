@@ -71,6 +71,60 @@ function M.write_task_store(dir, task, cfg)
     write_store(dir, cfg, store)
 end
 
+---First capture of a Lua `pattern` over a buffer's first `scan_lines` header lines,
+---or nil. Shared by the URL resolver and the sidecar backfill.
+---@param bufnr integer
+---@param pattern any
+---@param scan_lines integer?
+---@return string?
+local function scan_header(bufnr, pattern, scan_lines)
+    if type(pattern) ~= "string" or pattern == "" then
+        return nil
+    end
+    for _, line in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, scan_lines or 10, false)) do
+        local cap = line:match(pattern)
+        if cap and cap ~= "" then
+            return cap
+        end
+    end
+    return nil
+end
+
+---Ensure a problem's sidecar records its metadata, creating the sidecar if the
+---problem was set up outside the receive flow (e.g. a hand-made file that only has
+---the template header markers). Merges — the submit-verdict map is preserved — and
+---is cheap when nothing changed. The `url` is synced from the resolved value; the
+---`group` (contest) and `name` (problem) are backfilled from the header markers
+---**only when the sidecar lacks them**, so a received problem keeps the authoritative
+---Competitive Companion values.
+---@param ctx table submit context (bufnr/filepath/url/cfg)
+local function persist_task(ctx)
+    local scfg = ctx.cfg.submit
+    local dir = vim.fn.fnamemodify(ctx.filepath, ":h")
+    local store = read_store(dir, ctx.cfg)
+    local dirty = false
+
+    if ctx.url and ctx.url ~= "" and store.url ~= ctx.url then
+        store.url, dirty = ctx.url, true
+    end
+    if not store.group then
+        local g = scan_header(ctx.bufnr, scfg.group, scfg.url_scan_lines)
+        if g then
+            store.group, dirty = g, true
+        end
+    end
+    if not store.name then
+        local n = scan_header(ctx.bufnr, scfg.name, scfg.url_scan_lines)
+        if n then
+            store.name, dirty = n, true
+        end
+    end
+
+    if dirty then
+        write_store(dir, ctx.cfg, store)
+    end
+end
+
 ---Read a problem directory's task sidecar, or nil if absent/unreadable.
 ---@param dir string
 ---@param cfg table
@@ -82,6 +136,24 @@ function M.read_task_store(dir, cfg)
     end
     local ok, decoded = pcall(vim.json.decode, content)
     return ok and type(decoded) == "table" and decoded or nil
+end
+
+---A friendly name for a solution in the submit status, resolved exactly like the URL:
+---the `submit.name` header marker (e.g. `// problem: A - Two Together`) if present,
+---else the problem name stored in the sidecar, else the file's basename (`main.cpp`).
+---@param ctx table submit context (bufnr/filepath/cfg/scfg)
+---@return string
+local function display_name(ctx)
+    local marked = scan_header(ctx.bufnr, ctx.scfg.name, ctx.scfg.url_scan_lines)
+    if marked then
+        return marked
+    end
+    local store = M.read_task_store(vim.fn.fnamemodify(ctx.filepath, ":h"), ctx.cfg)
+    local nm = store and store.name
+    if type(nm) == "string" and nm ~= "" then
+        return nm
+    end
+    return vim.fn.fnamemodify(ctx.filepath, ":t")
 end
 
 ---File modification time as a `"sec.nsec"` string, or nil — used to detect a
@@ -112,6 +184,65 @@ local function write_submit_status(path, entry, cfg)
     write_store(dir, cfg, store)
 end
 
+---Remove a solution's persisted verdict from its directory's sidecar (a no-op if
+---absent). Used by edit-invalidation so a stale verdict doesn't linger on disk once
+---the source changes; url/name/group and other files' verdicts are preserved.
+---@param path string absolute solution path
+---@param cfg table
+local function clear_submit_status(path, cfg)
+    local dir = vim.fn.fnamemodify(path, ":h")
+    local store = read_store(dir, cfg)
+    local key = vim.fn.fnamemodify(path, ":t")
+    if type(store.submit) == "table" and store.submit[key] ~= nil then
+        store.submit[key] = nil
+        write_store(dir, cfg, store)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Per-judge routing
+--------------------------------------------------------------------------------
+
+---Derive a judge key from a submission URL's host: "https://atcoder.jp/…" →
+---"atcoder", "https://codeforces.com/…" → "codeforces", "contest.yandex.com" →
+---"yandex". Lowercased; a URL without a host → "".
+---@param url string?
+---@return string
+local function judge_of(url)
+    local host = type(url) == "string" and url:match("://([^/]+)") or ""
+    host = (host or ""):gsub("^www%.", "")
+    local name = host:match("([%w%-]+)%.%w+$") or host
+    return name:lower()
+end
+
+---The effective `submit` config for a URL: `submit.judges[<judge>]` (a partial
+---override table) shallow-merged over the base `submit`, so any field
+---(`command`/`verdicts`/`languages`/`watch`/…) can be set per judge with the base as
+---fallback. No matching override → the base config unchanged (so the default,
+---single-tool setup behaves exactly as before).
+---@param scfg table base `submit` config
+---@param url string?
+---@return table
+local function judge_scfg(scfg, url)
+    local over = type(scfg.judges) == "table" and scfg.judges[judge_of(url)]
+    if type(over) ~= "table" then
+        return scfg
+    end
+    return vim.tbl_extend("force", scfg, over)
+end
+
+---Resolve the submit command from an effective config: a string, or a
+---`function(ctx) -> string` for fully programmatic dispatch.
+---@param ctx table
+---@return string?
+local function resolve_command(ctx)
+    local c = ctx.scfg.command
+    if type(c) == "function" then
+        return c(ctx)
+    end
+    return c
+end
+
 --------------------------------------------------------------------------------
 -- Resolution
 --------------------------------------------------------------------------------
@@ -127,14 +258,9 @@ local function resolve_url(bufnr, filepath, cfg)
     if type(scfg.url) == "function" then
         return scfg.url({ bufnr = bufnr, filepath = filepath })
     end
-    if type(scfg.url) == "string" and scfg.url ~= "" then
-        local lines = vim.api.nvim_buf_get_lines(bufnr, 0, scfg.url_scan_lines or 10, false)
-        for _, line in ipairs(lines) do
-            local url = line:match(scfg.url)
-            if url then
-                return url
-            end
-        end
+    local marked = scan_header(bufnr, scfg.url, scfg.url_scan_lines)
+    if marked then
+        return marked
     end
     local store = M.read_task_store(vim.fn.fnamemodify(filepath, ":h"), cfg)
     return store and store.url or nil
@@ -150,16 +276,17 @@ local function resolve_lang(bufnr, scfg)
 end
 
 ---Build the submit context for a buffer, or nil + a reason on failure. Saves the
----buffer first (a submit must use the on-disk file).
+---buffer first (a submit must use the on-disk file). `scfg` is the **effective**
+---submit config (base with any `submit.judges[<judge>]` override applied), resolved
+---once the URL — and thus the judge — is known; the providers use it throughout.
 ---@param bufnr integer
----@return { bufnr: integer, filepath: string, url: string, lang: string?, cfg: table, modifiers: table }?, string?
+---@return { bufnr: integer, filepath: string, url: string, lang: string?, cfg: table, scfg: table, modifiers: table }?, string?
 function M.context(bufnr)
     local filepath = vim.api.nvim_buf_get_name(bufnr)
     if filepath == "" then
         return nil, "the current buffer has no file to submit."
     end
     local cfg = config.get_buffer_config(bufnr)
-    local scfg = cfg.submit
 
     if vim.bo[bufnr].modified then
         vim.api.nvim_buf_call(bufnr, function()
@@ -173,17 +300,29 @@ function M.context(bufnr)
             "no submission URL found — add a URL marker to the header (see `submit.url`), "
                 .. "or receive the problem so its URL is stored in the sidecar."
     end
+    -- Now that we know the URL (hence the judge), fold in any per-judge override.
+    local scfg = judge_scfg(cfg.submit, url)
     local lang = resolve_lang(bufnr, scfg)
     if not lang then
         return nil,
-            ("no submit language for filetype '%s' — set `submit.languages.%s`."):format(
+            ("no submit language for filetype '%s' — set `submit.languages.%s` (or `submit.judges.%s.languages.%s`)."):format(
                 vim.bo[bufnr].filetype,
+                vim.bo[bufnr].filetype,
+                judge_of(url),
                 vim.bo[bufnr].filetype
             )
     end
 
     local modifiers = vim.tbl_extend("force", utils.file_format_modifiers, { URL = url, LANG = lang })
-    return { bufnr = bufnr, filepath = filepath, url = url, lang = lang, cfg = cfg, modifiers = modifiers }
+    return {
+        bufnr = bufnr,
+        filepath = filepath,
+        url = url,
+        lang = lang,
+        cfg = cfg,
+        scfg = scfg,
+        modifiers = modifiers,
+    }
 end
 
 --------------------------------------------------------------------------------
@@ -251,6 +390,7 @@ local function run_toggleterm(cmd, scfg, tt)
     if not cached.tt.job_id then
         cached.tt:spawn()
     end
+    cached.tt:open() -- make the terminal visible, so submit output/errors are seen
     cached.tt:send(cmd)
 end
 
@@ -290,6 +430,11 @@ end
 ---@field token integer invalidates a pending timeout when superseded
 
 M.state = {} ---@type table<string, tuna.SubmitState>
+-- One in-flight watch job per solution path (the `vim.system` handle). Its presence
+-- is the "already submitting" lock that stops a spammed `<leader>cs` from firing
+-- several real submissions at once; it's cleared when the job exits, times out, or is
+-- cleared. Only the watch path tracks jobs (the terminal path is fire-and-forget).
+local jobs = {} ---@type table<string, vim.SystemObj>
 local token_seq = 0
 
 local FINAL = { accepted = true, rejected = true, partial = true }
@@ -335,10 +480,19 @@ local function set_state(path, state, text, url, timeout_ms)
     return st.token
 end
 
----Clear a buffer's submit state (manual dismiss).
+---Clear a buffer's submit state (manual dismiss) and cancel any in-flight watch job
+---for it — the way to get rid of a lingering indicator after abandoning a submission.
 ---@param bufnr integer?
 function M.clear(bufnr)
-    M.state[buf_path(bufnr)] = nil
+    local path = buf_path(bufnr)
+    local handle = jobs[path]
+    if handle then
+        jobs[path] = nil
+        pcall(function()
+            handle:kill("sigterm") -- stop the tracked poll; the submission already happened
+        end)
+    end
+    M.state[path] = nil
     refresh_status()
 end
 
@@ -357,7 +511,10 @@ local function arm_invalidation(bufnr)
         once = true,
         desc = "Invalidate the Tuna submit verdict when the solution is edited",
         callback = function(ev)
-            M.clear(ev.buf)
+            M.clear(ev.buf) -- hide the lualine verdict now …
+            -- … and drop the persisted verdict, so it doesn't linger in the sidecar
+            -- (or get restored on a later reopen). Global config for the store path.
+            clear_submit_status(vim.api.nvim_buf_get_name(ev.buf), config.current_setup)
         end,
     })
 end
@@ -377,15 +534,38 @@ function M.status(bufnr)
     return st and ("🐟 " .. st.text) or ""
 end
 
----Highlight group for the current (or given) buffer's verdict (for a lualine `color`).
----@param bufnr integer?
+---Resolve a highlight group's foreground to a `#rrggbb` string, or nil.
+---@param group string
 ---@return string?
+local function hl_fg(group)
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+    if ok and hl and hl.fg then
+        return string.format("#%06x", hl.fg)
+    end
+    return nil
+end
+
+---lualine `color` for the current (or given) buffer's verdict, from `verdict_hl[state]`.
+---That value may be a **color table** (e.g. `{ fg = "#ff6c6b" }`, returned as-is so it
+---can match your palette exactly) or a **highlight-group name** (its foreground is
+---resolved into a foreground-only `{ fg, gui = "bold" }` table — matching the receive
+---component's style, so the verdict is coloured without painting a section background).
+---@param bufnr integer?
+---@return table|string|nil
 function M.status_hl(bufnr)
     local st = M.state[buf_path(bufnr)]
     if not st then
         return nil
     end
-    return (config.current_setup.submit.verdict_hl or {})[st.state]
+    local spec = (config.current_setup.submit.verdict_hl or {})[st.state]
+    if type(spec) == "table" then
+        return spec
+    end
+    if type(spec) ~= "string" then
+        return nil
+    end
+    local fg = hl_fg(spec)
+    return fg and { fg = fg, gui = "bold" } or spec
 end
 
 ---Restore a persisted final verdict for a buffer from its sidecar, so the lualine
@@ -416,40 +596,143 @@ end
 -- Watch mode: run the submit as a tracked job and parse the verdict
 --------------------------------------------------------------------------------
 
----Strip ANSI escape sequences (colors, cursor moves) from a string.
+---Strip ANSI/terminal control from a string: OSC and CSI escape sequences (colors,
+---cursor moves, private `?25l`-style show/hide, `\27[38;5;…m` 256-colour), any stray
+---escape byte, and other C0 control characters (backspace, bell, …). `\t`/`\n`/`\r`
+---are kept so line/segment scanning still works. Robust enough for a crossterm-styled
+---submitter that redraws its status in place.
 ---@param s string
 ---@return string
 local function strip_ansi(s)
-    return (s:gsub("\27%[[0-9;]*[A-Za-z]", ""))
+    s = s:gsub("\27%].-\7", "") -- OSC … BEL
+    s = s:gsub("\27%].-\27\\", "") -- OSC … ST
+    s = s:gsub("\27%[[0-9;:<=>?]*[ -/]*[@-~]", "") -- CSI (params, intermediates, final)
+    s = s:gsub("[\1-\8\11\12\14-\31\127]", "") -- other C0 controls + stray ESC (0x1b)
+    return s
 end
 
----Classify a status line into a verdict state via `submit.verdicts`, or nil.
----@param line string
----@param scfg table
----@return string?
-local function classify(line, scfg)
-    local lower = line:lower()
-    for _, rule in ipairs(scfg.verdicts or {}) do
-        if lower:find(rule[1]) then
-            return rule[2]
-        end
+
+---Pick the most informative line from a tool's output to show on failure.
+---A verbose submit CLI logs a wall of `[INFO]`/`[NETWORK]` progress plus a
+---cookie-save on exit, so the *last* line ("[INFO] save cookie to: …") is noise, not
+---the reason. It also tends to print a **specific** reason (the judge's own alert,
+---e.g. `<judge> says: You can submit … again N seconds later`) followed by a
+---**generic** `submission failed`; the specific line is what the user needs. Prefer,
+---in order: the judge's own message (`says:`/`alert`), else a line naming the error
+---(`[ERROR]`/`[FAILURE]`/error/fail/limit) — but if that is the generic
+---"submission failed/error", prepend the nearest preceding specific line — else the
+---last line that isn't progress noise, else the last non-empty line. If a specific
+---and a generic line are both present they're joined (`reason — submission failed`).
+---Searches stderr first, then stdout.
+---@param err string raw stderr
+---@param out string raw stdout
+---@return string
+local function meaningful_tail(err, out)
+    local function is_generic(low)
+        return low:find("submission failed") or low:find("submission error")
     end
-    return nil
+    local function pick(blob)
+        local lines = {}
+        for line in strip_ansi(blob):gmatch("[^\r\n]+") do
+            local t = line:gsub("^%s+", ""):gsub("%s+$", "")
+            if t ~= "" then
+                lines[#lines + 1] = t
+            end
+        end
+        -- the judge's own alert is the real reason — surface it (rightmost wins).
+        for i = #lines, 1, -1 do
+            local low = lines[i]:lower()
+            if low:find("says:") or low:find("alert") then
+                return lines[i]
+            end
+        end
+        -- else the last line flagged as an error / failure / limit.
+        for i = #lines, 1, -1 do
+            local low = lines[i]:lower()
+            if low:find("%[error%]") or low:find("%[failure%]") or low:find("error") or low:find("fail") or low:find("limit") then
+                -- A bare "submission failed" is generic; pair it with the nearest
+                -- preceding specific flagged line if there is one.
+                if is_generic(low) then
+                    for j = i - 1, 1, -1 do
+                        local lj = lines[j]:lower()
+                        if not is_generic(lj) and (lj:find("error") or lj:find("fail") or lj:find("limit") or lj:find("says:") or lj:find("alert")) then
+                            return lines[j] .. " — " .. lines[i]
+                        end
+                    end
+                end
+                return lines[i]
+            end
+        end
+        -- else last line that isn't routine progress/cookie chatter
+        for i = #lines, 1, -1 do
+            local low = lines[i]:lower()
+            if not (low:find("^%[info%]") or low:find("^%[network%]") or low:find("cookie")) then
+                return lines[i]
+            end
+        end
+        return lines[#lines]
+    end
+    return pick(err) or pick(out) or ""
 end
 
----The latest non-empty "current line" in a stdout blob, accounting for the `\r`
----in-place updates the submitter uses to refresh one status line.
+---Start index of the last (rightmost) match of Lua pattern `pat` in `hay`, or nil.
+---@param hay string
+---@param pat string
+---@return integer?
+local function last_match(hay, pat)
+    local last, init = nil, 1
+    while true do
+        local s, e = hay:find(pat, init)
+        if not s then
+            break
+        end
+        last, init = s, math.max(e + 1, s + 1)
+    end
+    return last
+end
+
+---Scan a whole stdout blob for the judge verdict. A crossterm submitter redraws its
+---status in place with cursor moves (no `\r`/`\n`), so after stripping control codes
+---every frame collapses onto one line — a plain "last line" scan would then see all of
+---"Testing … Running … Accepted" at once and match the *first* keyword. Instead we
+---prefer a **final** verdict anywhere in the stream (the submission finished) over any
+---pending keyword, taking the rightmost (most recent) match of each; only when no final
+---verdict is present do we surface the latest pending frame. The display text is a tidy
+---snippet from the matched keyword up to the next frame boundary (tab / newline),
+---bounded — so lualine shows `Accepted` / `failed on test 6` / `Running (on test 6)`,
+---not the whole concatenated blob.
 ---@param blob string
----@return string?
-local function last_segment(blob)
-    local seg = nil
-    for piece in strip_ansi(blob):gmatch("[^\r\n]+") do
-        local trimmed = piece:gsub("^%s+", ""):gsub("%s+$", "")
-        if trimmed ~= "" then
-            seg = trimmed
+---@param scfg table
+---@return string?, string?
+local function scan_verdict(blob, scfg)
+    local clean = strip_ansi(blob)
+    local lower = clean:lower()
+
+    -- Rightmost match among the rules of a given finality (final first, then pending).
+    local function pick(want_final)
+        local pos, state
+        for _, rule in ipairs(scfg.verdicts or {}) do
+            if (FINAL[rule[2]] == true) == want_final then
+                local p = last_match(lower, rule[1])
+                if p and (not pos or p >= pos) then
+                    pos, state = p, rule[2]
+                end
+            end
         end
+        return pos, state
     end
-    return seg
+
+    local pos, state = pick(true)
+    if not pos then
+        pos, state = pick(false)
+    end
+    if not pos then
+        return nil
+    end
+
+    -- Clean snippet: from the keyword to the next frame boundary, trimmed and capped.
+    local snippet = (clean:sub(pos):match("^[^\r\n\t]*") or ""):gsub("%s+$", ""):sub(1, 60)
+    return state, snippet
 end
 
 ---Run the submit command as a tracked async job, parsing stdout for the judge
@@ -460,42 +743,63 @@ end
 ---@param cmd string expanded shell command
 local function run_watch(ctx, cmd)
     local path = ctx.filepath
-    local scfg = ctx.cfg.submit
+    local scfg = ctx.scfg -- effective (per-judge) submit config
+    local name = display_name(ctx) -- header/sidecar problem name if known, else the basename
+
+    -- A new submit of the same file **supersedes** any in-flight one: cancel the old
+    -- poll and take over lualine/sidecar with this submission. Detaching first
+    -- (`jobs[path] = nil`) means the old job's callbacks — its `on_stdout`, exit, and
+    -- timeout all gate on `jobs[path] == <their handle>` — see they're no longer the
+    -- active job and stand down without touching this one's state.
+    local previous = jobs[path]
+    if previous then
+        jobs[path] = nil
+        pcall(function()
+            previous:kill("sigterm")
+        end)
+    end
+
     -- The file was just saved by M.context, so this mtime identifies the exact
     -- source the verdict belongs to; persist it so a later edit invalidates it.
     local submit_mtime = file_mtime(path)
     -- This job "owns" the buffer's state only while its own tokens are the latest;
     -- a manual clear or a newer submit supersedes it, and its exit handler must not
     -- clobber that. `my_token` tracks our last write; `reached_final` records our
-    -- own outcome independent of the (mutable) shared state.
-    local my_token = set_state(path, "pending", "submitting " .. vim.fn.fnamemodify(path, ":t") .. "…")
+    -- own outcome independent of the (mutable) shared state. `settled` guards the
+    -- safety timeout from firing once the job has already ended.
+    local my_token = set_state(path, "pending", "submitting " .. name)
     local reached_final = false
+    local settled = false
 
     local out_acc, err_acc, url = "", "", nil
+    local handle ---@type vim.SystemObj  (forward-declared so callbacks can gate on it)
 
     local function on_stdout(data)
-        if reached_final then
-            return -- we already have a terminal verdict; ignore trailing output
+        if reached_final or jobs[path] ~= handle then
+            return -- terminal verdict already, or superseded/cleared by a newer submit
         end
         out_acc = out_acc .. data
-        url = out_acc:match("[Ss]ubmission url:%s*(%S+)") or url
-        local seg = last_segment(out_acc)
-        if seg then
-            local state = classify(seg, scfg)
-            if state then
-                my_token = set_state(path, state, seg, url)
-                if FINAL[state] then
-                    reached_final = true
-                    -- Persist the verdict (survives a restart) and drop it the moment
-                    -- the solution is edited.
-                    write_submit_status(path, { state = state, text = seg, url = url, mtime = submit_mtime }, ctx.cfg)
-                    arm_invalidation(ctx.bufnr)
-                end
+        url = strip_ansi(out_acc):match("[Ss]ubmission url:%s*(%S+)") or url
+        if scfg.expects_verdict == false then
+            return -- fire-and-forget tool: keep the "submitting …" flash, don't parse verdicts
+        end
+        local state, seg = scan_verdict(out_acc, scfg)
+        -- Only push a state when it actually changed, so live redraw frames don't
+        -- churn lualine (and the initial "submitting…" isn't overwritten by itself).
+        local cur = M.state[path]
+        if state and not (cur and cur.state == state and cur.text == seg) then
+            my_token = set_state(path, state, seg, url)
+            if FINAL[state] then
+                reached_final = true
+                -- Persist the verdict (survives a restart) and drop it the moment
+                -- the solution is edited.
+                write_submit_status(path, { state = state, text = seg, url = url, mtime = submit_mtime }, ctx.cfg)
+                arm_invalidation(ctx.bufnr)
             end
         end
     end
 
-    vim.system({ vim.o.shell, "-c", cmd }, {
+    handle = vim.system({ vim.o.shell, "-c", cmd }, {
         text = true,
         stdout = function(_, data)
             if data then
@@ -511,6 +815,22 @@ local function run_watch(ctx, cmd)
         end,
     }, function(res)
         vim.schedule(function()
+            settled = true
+            if jobs[path] == handle then
+                jobs[path] = nil -- release the "already submitting" lock
+            end
+            if scfg.log_file and scfg.log_file ~= "" then
+                local st = M.state[path]
+                local dump = ("== submit %s (exit %s) ==\n-- parsed: %s / %s\n-- stdout (raw) --\n%s\n-- stderr --\n%s\n"):format(
+                    os.date("%Y-%m-%d %H:%M:%S"),
+                    tostring(res.code),
+                    st and st.state or "nil",
+                    st and st.text or "nil",
+                    out_acc,
+                    err_acc
+                )
+                pcall(vim.fn.writefile, vim.split(dump, "\n", { plain = true }), vim.fn.expand(scfg.log_file))
+            end
             if reached_final then
                 return -- this job parsed a verdict; keep it
             end
@@ -520,14 +840,91 @@ local function run_watch(ctx, cmd)
             if not (st and st.token == my_token) then
                 return
             end
-            local tail = strip_ansi(err_acc):gsub("%s+$", "")
+            -- Fire-and-forget tool (no verdict stream): a clean exit is a successful
+            -- submit — the tool's own output / opened browser is the feedback — so
+            -- just clear the "submitting …" flash. Only a non-zero exit is an error.
+            if scfg.expects_verdict == false and res.code == 0 then
+                M.state[path] = nil
+                refresh_status()
+                return
+            end
+            -- Surface the tool's actual error line, not its trailing progress noise
+            -- (a verbose CLI ends with lines like "[INFO] save cookie to: …"). Falls
+            -- back to stdout for tools that report the reason there (e.g. the Rust
+            -- submitter's "Unsupported domain: atcoder.jp").
+            local tail = meaningful_tail(err_acc, out_acc)
             if tail == "" then
                 tail = "exited with code " .. tostring(res.code)
             end
             set_state(path, "error", "submit failed", url)
+            arm_invalidation(ctx.bufnr) -- a failed verdict is stale once the source changes
             utils.notify("submit failed — " .. tail, "ERROR")
         end)
     end)
+    jobs[path] = handle
+
+    -- Safety net: if the poll never finishes (the submitter hangs, or the user walks
+    -- away), stop watching after `watch_timeout` ms so the "submitting…" indicator
+    -- doesn't stick and the file can be resubmitted. The submission itself already
+    -- happened; we just stop polling for its verdict. 0 disables.
+    local tmo = scfg.watch_timeout or 0
+    if tmo > 0 then
+        vim.defer_fn(function()
+            if settled or reached_final or jobs[path] ~= handle then
+                return
+            end
+            jobs[path] = nil
+            pcall(function()
+                handle:kill("sigterm")
+            end)
+            local st = M.state[path]
+            if st and st.token == my_token then
+                M.state[path] = nil -- clear the stuck indicator (don't show a false failure)
+                refresh_status()
+            end
+            utils.notify("submit: stopped watching " .. name .. " after timeout (no verdict).", "WARN")
+        end, tmo)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Browser handoff
+--------------------------------------------------------------------------------
+
+---Turn a problem URL into the page to open for a manual browser submission.
+---AtCoder gates submission behind a Cloudflare Turnstile challenge that no headless
+---client can solve, so `:Tuna submit` there opens the submit page (task preselected)
+---for the user to paste into. For other hosts we just open the given URL.
+---@param url string
+---@return string
+local function browser_submit_url(url)
+    local contest, task = url:match("atcoder%.jp/contests/([^/]+)/tasks/([^/?#]+)")
+    if contest and task then
+        return ("https://atcoder.jp/contests/%s/submit?taskScreenName=%s"):format(contest, task)
+    end
+    return url
+end
+
+---Open `url` in the user's browser. Prefers `vim.ui.open` (Neovim 0.10+), else falls
+---back to the platform opener. Returns whether an opener was launched.
+---@param url string
+---@return boolean
+local function open_url(url)
+    if vim.ui and vim.ui.open then
+        local ok, obj = pcall(vim.ui.open, url)
+        if ok and obj then
+            return true
+        end
+    end
+    local cmd
+    if vim.fn.has("mac") == 1 then
+        cmd = { "open", url }
+    elseif vim.fn.has("win32") == 1 then
+        cmd = { "cmd", "/c", "start", "", url }
+    else
+        cmd = { "xdg-open", url }
+    end
+    return (pcall(vim.system, cmd, { detach = true }))
 end
 
 --------------------------------------------------------------------------------
@@ -541,14 +938,14 @@ M.providers = {}
 -- terminal (fire-and-forget) or, when `submit.watch` is set, as a tracked job whose
 -- verdict is shown in lualine. Both drive the per-buffer submit state.
 M.providers.command = function(ctx)
-    local scfg = ctx.cfg.submit
-    local template = scfg.command
+    local scfg = ctx.scfg -- effective (per-judge) submit config
+    local template = resolve_command(ctx)
     if not template or template == "" then
         utils.notify("submit: set `submit.command` (or choose another `submit.provider`).")
         return
     end
     local cmd = utils.format_modifiers(template, ctx.modifiers, ctx.filepath)
-    local name = vim.fn.fnamemodify(ctx.filepath, ":t")
+    local name = display_name(ctx) -- header/sidecar problem name if known, else the basename
 
     if scfg.watch then
         run_watch(ctx, cmd)
@@ -556,9 +953,34 @@ M.providers.command = function(ctx)
     end
 
     M.run_terminal(cmd, scfg)
-    utils.notify("submitting " .. name .. " (" .. ctx.lang .. ")…", "INFO")
     -- Terminal path can't learn the verdict, so flash a pending state that clears.
-    set_state(ctx.filepath, "pending", "submitting " .. name .. "…", nil, scfg.status_time)
+    -- (No `vim.notify` here — like the watch path, the lualine indicator is enough.)
+    set_state(ctx.filepath, "pending", "submitting " .. name, nil, scfg.status_time)
+end
+
+-- Browser-handoff provider: for judges that can't be submitted to from a headless
+-- client (AtCoder's Cloudflare Turnstile), open the submit page in the browser and
+-- copy the source to the system clipboard so the user just pastes and submits.
+M.providers.browser = function(ctx)
+    local scfg = ctx.scfg
+    local name = display_name(ctx)
+    local page = browser_submit_url(ctx.url)
+
+    -- The buffer was already saved by M.context; copy its source to the system
+    -- clipboard so the manual submit is just a paste.
+    pcall(function()
+        local src = table.concat(vim.api.nvim_buf_get_lines(ctx.bufnr, 0, -1, false), "\n")
+        vim.fn.setreg("+", src)
+    end)
+
+    if not open_url(page) then
+        utils.notify("submit: could not open a browser for " .. page, "ERROR")
+        return
+    end
+    -- Same lualine text as the terminal/watch paths ("submitting <name>"): the browser
+    -- handoff is just a manual variant of the same submit flow (paste + click). Brief
+    -- flash that clears after `status_time` (there's no verdict to track here).
+    set_state(ctx.filepath, "pending", "submitting " .. name, ctx.url, scfg.status_time)
 end
 
 --------------------------------------------------------------------------------
@@ -573,12 +995,15 @@ function M.submit(bufnr)
         utils.notify("submit: " .. err)
         return
     end
-    local name = ctx.cfg.submit.provider or "command"
+    local name = ctx.scfg.provider or "command" -- per-judge provider override allowed
     local provider = M.providers[name]
     if not provider then
         utils.notify("submit: unknown provider '" .. tostring(name) .. "'.")
         return
     end
+    -- Backfill the sidecar (url + contest/name from the header markers for a hand-made
+    -- problem), so the verdict can be persisted/restored even when it wasn't received.
+    persist_task(ctx)
     provider(ctx) -- the provider drives the per-buffer submit state
 end
 

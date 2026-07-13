@@ -27,6 +27,7 @@ M.actions = {
     edit_testcase = "Tuna edit_testcase",
     delete_testcase = "Tuna delete_testcase",
     submit = "Tuna submit",
+    submit_clear = "Tuna submit clear", -- dismiss a lingering lualine verdict / cancel a submit
     receive_testcases = "Tuna receive testcases",
     receive_problem = "Tuna receive problem",
     receive_contest = "Tuna receive contest",
